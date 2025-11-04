@@ -12,7 +12,7 @@ jobs:
   #########################################
   build-and-push:
     name: Build and Push to ECR
-    runs-on: ubuntu-latest # Yeh GitHub ka server hai
+    runs-on: ubuntu-latest
     
     # Is job ke outputs (results) hum doosre job mein istemal karenge
     outputs:
@@ -34,21 +34,21 @@ jobs:
 
       # Step 3: ECR par login karega
       - name: Login to Amazon ECR
-        id: login-ecr # Hum is step ko 'login-ecr' ID de rahe hain
+        id: login-ecr 
         uses: aws-actions/amazon-ecr-login@v1
 
       # Step 4: Docker image ko build, tag, aur push karega
       - name: Build, tag, and push image to Amazon ECR
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }} # Step 3 se mila hua registry URL
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}     # 'my-python-app' (secret se)
-          IMAGE_TAG: ${{ github.sha }}                    # Har push ka unique ID
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }} 
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}     
+          IMAGE_TAG: ${{ github.sha }}                    
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
   #########################################
-  # JOB 2: Naye image ko EC2 par deploy karega
+  # JOB 2: Naye image ko EC2 par deploy karega (FIXED AWS-CLI INSTALL)
   #########################################
   deploy-to-ec2:
     name: Deploy to EC2 Instance
@@ -66,24 +66,39 @@ jobs:
           
           # Yeh script aapke EC2 server par chalegi
           script: |
-            # Sab se pehle, server ko update karein aur AWS CLI install karein
-            # Kyunke yeh zaroori hai ECR se image pull karne ke liye
+            # Sab se pehle, server ko update karein
             sudo apt update -y
-            sudo apt install awscli -y
             
-            # Puraane job se mila hua registry URL istemal karke ECR par login karein
+            # 'unzip' install karein (kyunke AWS CLI zip file mein aati hai)
+            sudo apt install unzip -y
+            
+            # AWS CLI v2 ko official tareeqe se install karein (Yeh fix hai)
+            echo "Installing AWS CLI v2..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+            
+            # Installation ke baad safai karein
+            rm -rf awscliv2.zip aws
+            
+            # Ab baqi commands wese hi chalengi...
+            # ECR par login karein (Yeh ab kaam karega)
+            echo "Logging into ECR..."
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ needs.build-and-push.outputs.registry }}
             
             # Naya image pull karein
+            echo "Pulling new image..."
             docker pull ${{ needs.build-and-push.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}
             
-            # Purana container stop karein (agar chal raha hai toh)
-            # '|| true' likha hai taake agar container na mile (pehli baar) toh error na aaye
+            # Purana container stop/rm
+            echo "Stopping old container..."
             docker stop my-python-app || true
             docker rm my-python-app || true
             
-            # Naya container naye image se run karein
+            # Naya container run karein
+            echo "Starting new container..."
             docker run -d -p 5000:5000 --name my-python-app ${{ needs.build-and-push.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}
             
-            # Purane (dangling) images ko delete karein taake disk full na ho
+            # Purane images ko delete karein
+            echo "Pruning old images..."
             docker image prune -a -f
