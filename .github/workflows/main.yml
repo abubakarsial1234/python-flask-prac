@@ -1,0 +1,89 @@
+name: CI/CD Pipeline - Deploy Python App to EC2
+
+# Yeh pipeline kab chalegi: Jab 'main' branch par push ho
+on:
+  push:
+    branches:
+      - main  # Agar aapki branch ka naam 'master' hai toh isko 'master' kar dein
+
+jobs:
+  #########################################
+  # JOB 1: Code ko build karega aur ECR par push karega
+  #########################################
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest # Yeh GitHub ka server hai
+    
+    # Is job ke outputs (results) hum doosre job mein istemal karenge
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
+      image_tag: ${{ github.sha }}
+
+    steps:
+      # Step 1: Aapka code GitHub server par layega
+      - name: Check out the repo
+        uses: actions/checkout@v3
+
+      # Step 2: AWS credentials set karega (secrets se)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: ECR par login karega
+      - name: Login to Amazon ECR
+        id: login-ecr # Hum is step ko 'login-ecr' ID de rahe hain
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # Step 4: Docker image ko build, tag, aur push karega
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }} # Step 3 se mila hua registry URL
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}     # 'my-python-app' (secret se)
+          IMAGE_TAG: ${{ github.sha }}                    # Har push ka unique ID
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+  #########################################
+  # JOB 2: Naye image ko EC2 par deploy karega
+  #########################################
+  deploy-to-ec2:
+    name: Deploy to EC2 Instance
+    runs-on: ubuntu-latest
+    needs: build-and-push # Yeh job pehle 'build-and-push' job ka intezar karega
+
+    steps:
+      # Step 1: SSH ke zariye EC2 par login karega aur commands chalayega
+      - name: SSH into EC2 and Deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }} # 'ubuntu'
+          key: ${{ secrets.EC2_SSH_KEY }}
+          
+          # Yeh script aapke EC2 server par chalegi
+          script: |
+            # Sab se pehle, server ko update karein aur AWS CLI install karein
+            # Kyunke yeh zaroori hai ECR se image pull karne ke liye
+            sudo apt update -y
+            sudo apt install awscli -y
+            
+            # Puraane job se mila hua registry URL istemal karke ECR par login karein
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ needs.build-and-push.outputs.registry }}
+            
+            # Naya image pull karein
+            docker pull ${{ needs.build-and-push.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}
+            
+            # Purana container stop karein (agar chal raha hai toh)
+            # '|| true' likha hai taake agar container na mile (pehli baar) toh error na aaye
+            docker stop my-python-app || true
+            docker rm my-python-app || true
+            
+            # Naya container naye image se run karein
+            docker run -d -p 5000:5000 --name my-python-app ${{ needs.build-and-push.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ needs.build-and-push.outputs.image_tag }}
+            
+            # Purane (dangling) images ko delete karein taake disk full na ho
+            docker image prune -a -f
