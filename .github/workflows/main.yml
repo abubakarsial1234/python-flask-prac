@@ -19,10 +19,11 @@ jobs:
       image_tag: ${{ github.sha }}
 
     steps:
-      # ... Job 1 ka baqi hissa bilkul waisa hi rahega ...
+      # Step 1: Aapka code GitHub server par layega
       - name: Check out the repo
         uses: actions/checkout@v3
 
+      # Step 2: AWS credentials set karega (secrets se)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -30,10 +31,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Step 3: ECR par login karega
       - name: Login to Amazon ECR
         id: login-ecr 
         uses: aws-actions/amazon-ecr-login@v1
 
+      # Step 4: Docker image ko build, tag, aur push karega
       - name: Build, tag, and push image to Amazon ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }} 
@@ -44,7 +47,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
   #########################################
-  # JOB 2: Naye image ko EC2 par deploy karega (FINAL FIXED VERSION)
+  # JOB 2: Naye image ko EC2 par deploy karega (Safer Deployment)
   #########################################
   deploy-to-ec2:
     name: Deploy to EC2 Instance
@@ -76,7 +79,7 @@ jobs:
             sudo ./aws/install --update # --update flag pichli installation ko fix karega
             rm -rf awscliv2.zip aws
             
-            # 3. AWS Account ID EC2 server se khud maloom karein (Yeh naya hai)
+            # 3. AWS Account ID EC2 server se khud maloom karein
             echo "Fetching AWS Account ID..."
             TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
             AWS_ACCOUNT_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep accountId | awk -F'"' '{print $4}')
@@ -84,7 +87,7 @@ jobs:
             # 4. Sahi ECR Registry URL banayein
             ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
             
-            # 5. ECR par login karein (Yeh ab kamyab hoga)
+            # 5. ECR par login karein
             echo "Logging into ECR at $ECR_REGISTRY..."
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
             
@@ -94,16 +97,34 @@ jobs:
             # 7. Naya image pull karein
             echo "Pulling $IMAGE_NAME"
             docker pull $IMAGE_NAME
+
+            # 8. (NAYA STEP) Naye image ko test karein (Health Check)
+            echo "Running health check on new image..."
+            docker run -d --name my-python-app-test $IMAGE_NAME
+            sleep 5 # Wait for 5 seconds for the app to start
             
-            # 8. Purana container stop/rm karein
-            echo "Stopping old container..."
+            # Check karein ke test container abhi bhi 'running' state mein hai ya crash ho gaya
+            if [ "$(docker container inspect -f '{{.State.Status}}' my-python-app-test)" != "running" ]; then
+                echo "Health check FAILED! New container crashed."
+                docker logs my-python-app-test
+                docker rm my-python-app-test || true # Clean up test container
+                exit 1 # Pipeline ko fail karein
+            fi
+            
+            echo "Health check PASSED. New image is good."
+            # Test container ko stop aur remove karein
+            docker stop my-python-app-test || true
+            docker rm my-python-app-test || true
+            
+            # 9. Ab hum purana container stop karke naya deploy karenge
+            echo "Stopping old container (my-python-app)..."
             docker stop my-python-app || true
             docker rm my-python-app || true
             
-            # 9. Naya container run karein
-            echo "Starting new container..."
+            # 10. Naya container (jo pass ho chuka hai) run karein
+            echo "Starting new container (my-python-app)..."
             docker run -d -p 5000:5000 --name my-python-app $IMAGE_NAME
             
-            # 10. Purane images ko delete karein
+            # 11. Purane images ko delete karein
             echo "Pruning old images..."
             docker image prune -a -f
